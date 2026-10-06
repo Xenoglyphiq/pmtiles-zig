@@ -1,6 +1,6 @@
 # PMTiles — Spec
 
-> Capability id: `pmtiles` · Spec version: `0.1.1` · Status: draft
+> Capability id: `pmtiles` · Spec version: `0.2.0` · Status: draft
 > Implements: PMTiles v3, read only — https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md
 > Machine-readable contract: `capability.yaml` (this file explains it; if they disagree, fix one of them in the same PR)
 
@@ -109,20 +109,28 @@ Binary search the entries, which are sorted by `tile_id`. Then:
 ### `get_tile` (io)
 1. Read and decode the header, using the same rules and errors as `decode_header`.
 2. Compute the tile id. Coordinate errors are the same as for `zxy_to_tile_id`.
-3. Read the root directory: `root_directory_length` bytes at `root_directory_offset`. A length above `max_directory_bytes` → `pmtiles.directory_too_large`. Decompress it with `internal_compression` (below) and decode it as in `decode_directory`.
+3. Read the root directory: `root_directory_length` bytes at `root_directory_offset` (see **Reading a directory** below), and decode it as in `decode_directory`.
 4. Run `find_entry`.
    - Absent → return absent.
    - Tile entry → return `length` bytes at `tile_data_offset + offset`, **still compressed** with `tile_compression`.
-   - Leaf pointer → read `length` bytes at `leaf_directories_offset + offset`, decompress, decode, and repeat from step 4.
+   - Leaf pointer → read the leaf directory, `length` bytes at `leaf_directories_offset + offset`, exactly as the root, then decode it and repeat from step 4.
 5. The root is depth 0. Following more than `max_leaf_depth` leaf pointers → `pmtiles.leaf_depth_exceeded` (D-005).
 
-**Decompression:** `none` and `gzip` are required. `brotli` and `zstd` are optional per port, and each port's README says which it supports. Any compression a port can't decode, including `unknown` and unknown raw values → `pmtiles.unsupported_compression`. A failed read from the source → `pmtiles.source_failed` (io only).
+**Reading a directory** (root and leaves alike):
+1. A stored length above `max_directory_bytes` → `pmtiles.directory_too_large`, before reading.
+2. Read the bytes (see **Reads**).
+3. Decompress with `internal_compression`. More than `max_directory_bytes` of output → `pmtiles.directory_too_large`: the limit bounds the directory both as stored and as decompressed, so a small compressed directory can't expand without bound (D-006).
+
+**Reads:** a failed read from the source → `pmtiles.source_failed`. A read that returns fewer bytes than asked for means the archive points past its own end → `pmtiles.truncated`. `tile_data_offset + offset` and `leaf_directories_offset + offset` are u64 sums; overflow → `pmtiles.invalid_directory`.
+
+**Decompression:** `none` and `gzip` are required. `brotli` and `zstd` are optional per port, and each port's README says which it supports. Any compression a port can't decode, including `unknown` and unknown raw values → `pmtiles.unsupported_compression`. A stream in a supported compression that doesn't decode (corrupt data, cut short, or a gzip CRC-32 or length that doesn't match) → `pmtiles.decompression_failed` (D-006). Ports must check the gzip trailer even where their library leaves it to the caller. A port may stop as soon as output passes the limit, so a stream that is both corrupt and too large may report either code.
 
 ### `read_metadata` (io)
 1. Read and decode the header.
 2. `metadata_length > max_metadata_bytes` → `pmtiles.metadata_too_large`, before reading it.
-3. Read `metadata_length` bytes at `metadata_offset` and decompress with `internal_compression`, as for `get_tile`.
-4. Return the text as a **string**, unparsed: the archive's JSON exactly as stored. Parsing is left to the caller.
+3. Read `metadata_length` bytes at `metadata_offset` and decompress with `internal_compression`, with the same **Reads** and **Decompression** rules as `get_tile`. More than `max_metadata_bytes` of output → `pmtiles.metadata_too_large` (D-006).
+4. The bytes must be well-formed UTF-8 (RFC 3629: no overlong forms, no encoded surrogates, nothing above U+10FFFF); otherwise → `pmtiles.invalid_metadata` (D-007). Nothing else is checked: in particular, the JSON is not validated.
+5. Return the text as a **string**, unparsed: the archive's JSON exactly as stored, with no replacement characters. Parsing is left to the caller.
 
 ## 4. Ambiguities in the external standard
 
@@ -135,33 +143,35 @@ Binary search the entries, which are sorted by `tile_id`. Then:
 | A5 | Varints longer than 64 bits | `pmtiles.varint_overflow` | n/a: the oracle has unbounded integers |
 | A6 | Leaf nesting deeper than allowed | An error, `pmtiles.leaf_depth_exceeded` (D-005) | no: the oracle stops after 4 directory reads and returns nothing |
 | A7 | Truncated *and* wrong magic | `pmtiles.truncated`: length is checked first | n/a |
+| A8 | Internal data that doesn't decompress | `pmtiles.decompression_failed` (D-006) | partly: the oracle raises Python's gzip exceptions, with no code |
+| A9 | Metadata that isn't well-formed UTF-8 | `pmtiles.invalid_metadata` (D-007) | yes: the oracle raises while parsing the JSON |
 
 ## 5. Limits
 
 | Limit | Default | Why this default |
 |---|---|---|
 | `max_directory_entries` | 1,000,000 | Checked before allocating entries. Real directories hold far fewer, since writers split them into leaves. |
-| `max_directory_bytes` | 16 MiB | Bounds one directory fetch |
+| `max_directory_bytes` | 16 MiB | Bounds one directory, root or leaf, both as stored and decompressed |
 | `max_leaf_depth` | 4 | Stops cycles and deep chains in hostile archives. Real writers use 1. |
-| `max_metadata_bytes` | 16 MiB | Bounds the metadata fetch |
+| `max_metadata_bytes` | 16 MiB | Bounds the metadata, both as stored and decompressed |
 
 ## 6. Conformance
 
 - Oracle: Python `pmtiles==3.8.1`.
 - Levels:
   - `core`: header, directory, tile-id and find cases (55).
-  - `io`: `get_tile` and `read_metadata` on the archives in `conformance/cases/archives/` (13). Ports run these against a memory or file source.
+  - `io`: `get_tile` and `read_metadata` on the archives in `conformance/cases/archives/` (26). Ports run these against a memory or file source.
   - `full`: both.
 - Fixtures come from `conformance/generate/generate.py`, which uses the oracle's own writer to build:
   - a small archive (z0–z3, with a run of identical tiles and one missing tile);
   - an archive large and irregular enough to use **leaf directories** (z0–z7).
 
-  Errors, the decisions where we differ from the oracle, and archives the writer can't produce (uncompressed, unknown compression) are written from the spec (D-004). Every oracle result is cross-checked against a transcription of this section. Internal gzip in the archives uses deflate *stored* blocks, so regeneration is byte-identical on every platform (D-004).
+  Errors, the decisions where we differ from the oracle, and archives the writer can't produce are written from the spec (D-004). Those archives are assembled byte by byte: uncompressed or unknown compression, corrupt gzip, gzip that inflates past a limit (one hand-written fixed-Huffman block), nested leaf chains, entries past the end, overflowing offsets and non-UTF-8 metadata. Every oracle result is cross-checked against a transcription of this section. Internal gzip in the archives uses deflate *stored* blocks, so regeneration is byte-identical on every platform (D-004).
 
 ## 7. The three canonical examples
 
 1. **inspect_archive:** read the first 127 bytes of a local file, `decode_header`, and print the zooms, bounds and tile type.
-2. **fetch_one_tile:** open a local file as a source, `get_tile` for a coordinate, and print the byte count or "not found".
+2. **fetch_one_tile:** open a local file as a source, `get_tile` for a coordinate, and print the byte count or "not found". Defaults: `conformance/cases/archives/small.pmtiles` and tile `2/1/3`, so every port prints the same result.
 3. **remote_metadata:** create an HTTP range source, `read_metadata`, and print the JSON.
 
 ## 8. Performance target
@@ -171,7 +181,7 @@ Reference: Rust `pmtiles` crate, `get_tile` over 10,000 pseudo-random coordinate
 ## 9. Security notes
 
 Archives are untrusted input.
-- Every count and length is checked against a limit before allocating or fetching.
+- Every count and length is checked against a limit before allocating or fetching, and decompressed sizes are checked against the same limits while decompressing.
 - Leaf following is bounded by `max_leaf_depth`, so a cycle can't loop forever.
 - Varints are capped at 10 bytes, and all arithmetic on offsets and ids is checked.
 - Tile bytes are returned as-is and are never decompressed or parsed here.

@@ -51,7 +51,7 @@ from pmtiles.reader import MemorySource, Reader
 from pmtiles.writer import Writer
 
 ORACLE = {"language": "python", "package": "pmtiles", "version": "3.8.1", "script": "generate/generate.py"}
-SPEC_VERSION = "0.1.1"
+SPEC_VERSION = "0.2.0"
 GENERATED_AT = "2026-10-06T00:00:00Z"  # bump by hand when cases change
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ROOT / "cases"
@@ -74,6 +74,7 @@ KIND = {
     "pmtiles.invalid_zoom": "invalid_input", "pmtiles.tile_out_of_range": "invalid_input",
     "pmtiles.unsupported_compression": "unsupported", "pmtiles.leaf_depth_exceeded": "limit_exceeded",
     "pmtiles.metadata_too_large": "limit_exceeded",
+    "pmtiles.decompression_failed": "invalid_input", "pmtiles.invalid_metadata": "invalid_input",
 }
 
 
@@ -219,37 +220,74 @@ def spec_find_entry(entries: list[Entry], tile_id: int) -> Entry | None:
     return None
 
 
-def decompress(data: bytes, raw: int) -> bytes:
+U64_MAX = 2**64 - 1
+
+
+def read_exact(archive: bytes, off: int, length: int) -> bytes:
+    """A read the archive can't satisfy in full is pmtiles.truncated (§3 Reads)."""
+    if off + length > len(archive):
+        raise SpecError("pmtiles.truncated")
+    return archive[off:off + length]
+
+
+def checked_add(a: int, b: int) -> int:
+    """Offset arithmetic is u64: overflow is pmtiles.invalid_directory."""
+    if a + b > U64_MAX:
+        raise SpecError("pmtiles.invalid_directory")
+    return a + b
+
+
+def decompress(data: bytes, raw: int, limit: int, too_large: str) -> bytes:
+    """§3 Decompression: a stream that doesn't decode is decompression_failed; output above
+    `limit` bytes is `too_large`, the same limit that applies to the stored bytes."""
     if raw == 1:
-        return data
-    if raw == 2:
-        return gzip.decompress(data)
-    raise SpecError("pmtiles.unsupported_compression")
+        out = data
+    elif raw == 2:
+        try:
+            out = gzip.decompress(data)
+        except (OSError, EOFError, zlib.error):
+            raise SpecError("pmtiles.decompression_failed")
+    else:
+        raise SpecError("pmtiles.unsupported_compression")
+    if len(out) > limit:
+        raise SpecError(too_large)
+    return out
 
 
-def spec_get_tile(archive: bytes, z: int, x: int, y: int) -> bytes | None:
+def spec_read_directory(archive: bytes, comp: int, off: int, length: int, lim: dict) -> list[Entry]:
+    if length > lim["max_directory_bytes"]:
+        raise SpecError("pmtiles.directory_too_large")
+    raw = decompress(read_exact(archive, off, length), comp, lim["max_directory_bytes"], "pmtiles.directory_too_large")
+    return spec_decode_directory(raw, lim["max_directory_entries"])
+
+
+def spec_get_tile(archive: bytes, z: int, x: int, y: int, **limits) -> bytes | None:
+    lim = {**LIMITS, **limits}
     h = spec_decode_header(archive[:127])
     comp = archive[97]
     tid = spec_zxy_to_tile_id(z, x, y)
     off, length = int(h["root_directory_offset"]), int(h["root_directory_length"])
-    for depth in range(LIMITS["max_leaf_depth"] + 1):
-        entries = spec_decode_directory(decompress(archive[off:off + length], comp))
-        e = spec_find_entry(entries, tid)
+    for depth in range(lim["max_leaf_depth"] + 1):
+        e = spec_find_entry(spec_read_directory(archive, comp, off, length, lim), tid)
         if e is None:
             return None
         if e.run_length > 0:
-            start = int(h["tile_data_offset"]) + e.offset
-            return archive[start:start + e.length]
-        off, length = int(h["leaf_directories_offset"]) + e.offset, e.length
+            return read_exact(archive, checked_add(int(h["tile_data_offset"]), e.offset), e.length)
+        off, length = checked_add(int(h["leaf_directories_offset"]), e.offset), e.length
     raise SpecError("pmtiles.leaf_depth_exceeded")
 
 
-def spec_read_metadata(archive: bytes) -> str:
+def spec_read_metadata(archive: bytes, **limits) -> str:
+    lim = {**LIMITS, **limits}
     h = spec_decode_header(archive[:127])
-    if int(h["metadata_length"]) > LIMITS["max_metadata_bytes"]:
+    if int(h["metadata_length"]) > lim["max_metadata_bytes"]:
         raise SpecError("pmtiles.metadata_too_large")
-    off = int(h["metadata_offset"])
-    return decompress(archive[off:off + int(h["metadata_length"])], archive[97]).decode("utf-8")
+    raw = read_exact(archive, int(h["metadata_offset"]), int(h["metadata_length"]))
+    text = decompress(raw, archive[97], lim["max_metadata_bytes"], "pmtiles.metadata_too_large")
+    try:
+        return text.decode("utf-8")
+    except UnicodeDecodeError:
+        raise SpecError("pmtiles.invalid_metadata")
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +362,123 @@ def recompress_internal(archive: bytes, raw: int) -> bytes:
                      127 + len(root) + len(meta), 0)
     struct.pack_into("<QQ", out, 56, 127 + len(root) + len(meta), len(tiles))
     return bytes(out) + root + meta + tiles
+
+
+# ---------------------------------------------------------------------------
+# Hand-built archives (spec-sourced io cases the oracle's writer can't produce)
+# ---------------------------------------------------------------------------
+
+def varint(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def encode_directory(entries: list[tuple[int, int, int, int]]) -> bytes:
+    """Raw (uncompressed) directory from (tile_id, run_length, length, offset) tuples; offsets
+    are always stored explicitly (offset + 1), so no entry continues from the previous one."""
+    out = bytearray(varint(len(entries)))
+    last = 0
+    for tid, _, _, _ in entries:
+        out += varint(tid - last)
+        last = tid
+    for section in (1, 2):
+        for e in entries:
+            out += varint(e[section])
+    for e in entries:
+        out += varint(e[3] + 1)
+    return bytes(out)
+
+
+class BitWriter:
+    def __init__(self):
+        self.out, self.acc, self.n = bytearray(), 0, 0
+
+    def bits(self, value: int, count: int) -> None:  # LSB first
+        self.acc |= value << self.n
+        self.n += count
+        while self.n >= 8:
+            self.out.append(self.acc & 0xFF)
+            self.acc >>= 8
+            self.n -= 8
+
+    def huffman(self, code: int, length: int) -> None:  # Huffman codes go MSB first
+        self.bits(int(f"{code:0{length}b}"[::-1], 2), length)
+
+    def done(self) -> bytes:
+        if self.n:
+            self.out.append(self.acc & 0xFF)
+        return bytes(self.out)
+
+
+def gzip_rle(data: bytes) -> bytes:
+    """gzip with one fixed-Huffman block: runs of a byte become length-258, distance-1 copies.
+    Hand-written, so the bytes are the same on every platform (D-004), and unlike stored
+    blocks it really compresses, which the "inflates past the limit" cases need."""
+    w = BitWriter()
+    w.bits(1, 1)  # BFINAL
+    w.bits(1, 2)  # BTYPE 01: fixed Huffman
+
+    def literal(v: int) -> None:
+        if v < 144:
+            w.huffman(0x30 + v, 8)
+        else:
+            w.huffman(0x190 + v - 144, 9)
+
+    i = 0
+    while i < len(data):
+        literal(data[i])
+        run = 1
+        while i + run < len(data) and data[i + run] == data[i]:
+            run += 1
+        copies, rest = divmod(run - 1, 258)
+        for _ in range(copies):
+            w.huffman(285 - 280 + 0xC0, 8)  # length symbol 285 = 258, no extra bits
+            w.huffman(0, 5)  # distance symbol 0 = 1
+        for _ in range(rest):
+            literal(data[i])
+        i += run
+    w.huffman(0, 7)  # end of block (symbol 256)
+    body = w.done()
+    out = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff" + body + struct.pack("<II", zlib.crc32(data), len(data))
+    assert gzip.decompress(out) == data
+    return out
+
+
+def assemble(base: bytes, comp: int, root: bytes, meta: bytes = b"{}", leaves: bytes = b"",
+             tiles: bytes = b"", tile_data_offset: int | None = None) -> bytes:
+    """An archive from already-encoded sections (compressed with `comp` by the caller), laid out
+    root, metadata, leaves, tiles after `base`'s 127-byte header. `tile_data_offset` overrides
+    the stored tile data offset (overflow cases)."""
+    out = bytearray(base[:127])
+    out[97] = comp
+    meta_off = 127 + len(root)
+    leaf_off = meta_off + len(meta)
+    tile_off = leaf_off + len(leaves)
+    struct.pack_into("<QQQQQQ", out, 8, 127, len(root), meta_off, len(meta), leaf_off, len(leaves))
+    struct.pack_into("<QQ", out, 56, tile_off if tile_data_offset is None else tile_data_offset, len(tiles))
+    return bytes(out) + root + meta + leaves + tiles
+
+
+def leaf_chain(base: bytes, pointers: int) -> bytes:
+    """Root -> `pointers` leaf pointers deep -> one 4-byte tile for every id, uncompressed.
+    Each directory is one entry at tile id 0; leaves are laid out last to first."""
+    leaves = b""
+    final = encode_directory([(0, 1, 4, 0)])  # the directory that holds the tile
+    if pointers == 0:
+        return assemble(base, 1, final, tiles=b"tile")
+    # Leaf k (0-based) sits at offset k in leaf order: write the innermost first, then point upward.
+    chain = [final]
+    for _ in range(pointers - 1):
+        prev_off = sum(len(d) for d in chain[:-1])
+        chain.append(encode_directory([(0, 0, len(chain[-1]), prev_off)]))
+    leaves = b"".join(chain)
+    root = encode_directory([(0, 0, len(chain[-1]), len(leaves) - len(chain[-1]))])
+    return assemble(base, 1, root, leaves=leaves, tiles=b"tile")
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +668,92 @@ def build() -> None:
     meta_case("metadata.small", "archives/small.pmtiles", small, "gzip-compressed JSON")
     meta_case("metadata.leaves", "archives/leaves.pmtiles", leaves, "Archive with leaves")
     meta_case("metadata.uncompressed", small_none, files[small_none], "Internal compression 'none'", source="spec")
+
+    # --- io rules added in 0.2.0 (D-006, D-007), all on hand-built archives
+    def io_case(cid, op, name, archive, *args, **limits):
+        """get_tile: (zxy, description); read_metadata: (description,). Keyword args are limits."""
+        zxy, desc = (args[0], args[1]) if op == "get_tile" else (None, args[0])
+        name = put(f"archives/{name}.pmtiles", archive)
+        if op == "get_tile":
+            got, code = outcome(spec_get_tile, archive, *zxy, **limits)
+            inp = {"file": name, "args": {"coord": dict(zip("zxy", zxy))}}
+            ok = {"value": None} if got is None else b64(got)
+        else:
+            got, code = outcome(spec_read_metadata, archive, **limits)
+            inp = {"file": name}
+            ok = {"value": got}
+        add({"id": cid, "op": op, "level": "io", "group": f"{'get_tile' if op == 'get_tile' else 'metadata'}.v0_2",
+             "description": desc, "input": inp, "options": limits or None,
+             "expect": err(code) if code else ok,
+             "compare": "bytes" if (op == "get_tile" and not code and got is not None) else "exact", "source": "spec"})
+        return code
+
+    root_gz = small[hs["root_offset"]:hs["root_offset"] + hs["root_length"]]
+    meta_gz = small[hs["metadata_offset"]:hs["metadata_offset"] + hs["metadata_length"]]
+    small_tiles = small[hs["tile_data_offset"]:hs["tile_data_offset"] + hs["tile_data_length"]]
+    bad_crc = bytearray(root_gz); bad_crc[-8] ^= 0xFF
+    assert io_case("get_tile.error.decompression_failed", "get_tile", "bad-root-crc",
+                   assemble(small, 2, bytes(bad_crc), meta_gz, tiles=small_tiles), (2, 1, 3),
+                   "Root directory's gzip CRC-32 doesn't match: decompression_failed, not invalid_directory (D-006)"
+                   ) == "pmtiles.decompression_failed"
+    assert io_case("metadata.error.decompression_failed", "read_metadata", "cut-metadata-gzip",
+                   assemble(small, 2, root_gz, meta_gz[:-12], tiles=small_tiles),
+                   "Metadata gzip stream cut short: decompression_failed, not truncated (D-006)"
+                   ) == "pmtiles.decompression_failed"
+
+    # Inflating past the limit: the stored bytes fit, the decompressed bytes don't (D-006).
+    n = 1500
+    big_dir = encode_directory([(i, 1, 1, 0) for i in range(n)])  # every entry shares one tile: compresses well
+    flat_dir = encode_directory([(0, n, 1, 0)])  # control: same tiles as one run, tiny
+    big_gz = gzip_rle(big_dir)
+    assert len(big_gz) <= 1024 < len(big_dir), (len(big_gz), len(big_dir))
+    assert io_case("get_tile.error.directory_inflates_too_large", "get_tile", "inflating-root",
+                   assemble(small, 2, big_gz, gzip_rle(b"{}"), tiles=bytes(n)), (0, 0, 0),
+                   "Root is under max_directory_bytes compressed but over it decompressed",
+                   max_directory_bytes=1024) == "pmtiles.directory_too_large"
+    assert io_case("get_tile.directory_under_limit", "get_tile", "flat-root",
+                   assemble(small, 2, gzip_rle(flat_dir), gzip_rle(b"{}"), tiles=bytes(n)), (0, 0, 0),
+                   "Control: the same limit with a small directory succeeds", max_directory_bytes=1024) is None
+    meta_text = b'{"description":"' + b" " * 3000 + b'"}'
+    meta_rle = gzip_rle(meta_text)
+    assert len(meta_rle) <= 1024 < len(meta_text)
+    assert io_case("metadata.error.inflates_too_large", "read_metadata", "inflating-metadata",
+                   assemble(small, 2, gzip_rle(flat_dir), meta_rle, tiles=bytes(n)),
+                   "Metadata is under max_metadata_bytes compressed but over it decompressed",
+                   max_metadata_bytes=1024) == "pmtiles.metadata_too_large"
+
+    # Short reads, leaf limits and overflow (uncompressed internals keep these readable).
+    assert io_case("get_tile.error.tile_past_end", "get_tile", "tile-past-end",
+                   assemble(small, 1, encode_directory([(0, 1, 100, 0)]), tiles=b"only ten b"), (0, 0, 0),
+                   "A tile entry ends past the end of the archive: truncated") == "pmtiles.truncated"
+    leaf = encode_directory([(i, 1, 1, i) for i in range(40)])
+    assert len(leaf) > 100
+    assert io_case("get_tile.error.leaf_too_large", "get_tile", "big-leaf",
+                   assemble(small, 1, encode_directory([(0, 0, len(leaf), 0)]), leaves=leaf, tiles=bytes(40)), (0, 0, 0),
+                   "max_directory_bytes applies to leaf directories, not just the root",
+                   max_directory_bytes=100) == "pmtiles.directory_too_large"
+    assert io_case("get_tile.error.offset_overflow", "get_tile", "offset-overflow",
+                   assemble(small, 1, encode_directory([(0, 1, 4, 10)]), tiles=b"tile", tile_data_offset=U64_MAX - 5),
+                   (0, 0, 0), "tile_data_offset + entry offset overflows u64: invalid_directory"
+                   ) == "pmtiles.invalid_directory"
+
+    # Leaf depth (D-005): the root is depth 0; 4 pointers is the default limit.
+    assert io_case("get_tile.leaf_depth.at_limit", "get_tile", "leaf-chain-4", leaf_chain(small, 4), (0, 0, 0),
+                   "Four nested leaf pointers: allowed at the default max_leaf_depth of 4") is None
+    assert io_case("get_tile.error.leaf_depth_exceeded", "get_tile", "leaf-chain-5", leaf_chain(small, 5), (0, 0, 0),
+                   "Five nested leaf pointers: one more than the default limit") == "pmtiles.leaf_depth_exceeded"
+
+    # Metadata must be well-formed UTF-8 (D-007).
+    for cid, name, text, desc in [
+        ("metadata.error.invalid_utf8", "metadata-latin1", b'{"name":"caf\xe9"}', "A Latin-1 byte (0xE9) isn't UTF-8"),
+        ("metadata.error.utf8_surrogate", "metadata-surrogate", b'{"name":"\xed\xa0\x80"}',
+         "An encoded UTF-16 surrogate (U+D800) isn't well-formed UTF-8"),
+    ]:
+        assert io_case(cid, "read_metadata", name, assemble(small, 1, encode_directory([(0, 1, 4, 0)]), text, tiles=b"tile"),
+                       desc) == "pmtiles.invalid_metadata"
+    assert io_case("metadata.utf8_multibyte", "read_metadata", "metadata-utf8",
+                   assemble(small, 1, encode_directory([(0, 1, 4, 0)]), '{"name":"Firenze ✓ 🗺"}'.encode(), tiles=b"tile"),
+                   "Valid multi-byte UTF-8 is returned as is") is None
 
 
 def main() -> None:

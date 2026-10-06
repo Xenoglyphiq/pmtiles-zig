@@ -1,6 +1,6 @@
 # PMTiles for Zig
 
-Read [PMTiles v3](https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md) single-file tile archives: header, directories, tile lookup and tile bytes, from memory, a local file, or any byte source you plug in (such as HTTP range requests). Implements PMTiles v3 (read only) · Spec v0.1.1 · Conformance: **core ✓ io ✓ full ✓** (68/68)
+Read [PMTiles v3](https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md) single-file tile archives: header, directories, tile lookup and tile bytes, from memory, a local file, or any byte source you plug in (such as HTTP range requests). Implements PMTiles v3 (read only) · Spec v0.2.0 · Conformance: **core ✓ io ✓ full ✓** (81/81)
 
 > **Tile bytes are returned as stored.** `getTile` gives you the tile still compressed with `header.tile_compression` and doesn't parse it. Decoding MVT, PNG or other contents is up to you.
 
@@ -9,7 +9,7 @@ Requires Zig **0.17.0**. Standard library only: gzip is `std.compress.flate`.
 ## Install
 
 ```
-zig fetch --save git+https://github.com/Xenoglyphiq/pmtiles-zig#v0.1.0
+zig fetch --save git+https://github.com/Xenoglyphiq/pmtiles-zig#v0.2.0
 ```
 
 Then in `build.zig`:
