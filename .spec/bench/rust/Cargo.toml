@@ -1,0 +1,16 @@
+[package]
+name = "pmtiles-bench-reference"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Reference timings for the pmtiles spec: the Rust pmtiles crate, get_tile over bench/coords.txt"
+
+[dependencies]
+pmtiles = { version = "=0.24.1", default-features = false, features = ["mmap-async-tokio"] }
+bytes = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[profile.release]
+codegen-units = 1
+lto = true

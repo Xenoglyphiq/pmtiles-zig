@@ -1,6 +1,6 @@
 # PMTiles — Spec
 
-> Capability id: `pmtiles` · Spec version: `0.1.0` · Status: draft
+> Capability id: `pmtiles` · Spec version: `0.1.1` · Status: draft
 > Implements: PMTiles v3, read only — https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md
 > Machine-readable contract: `capability.yaml` (this file explains it; if they disagree, fix one of them in the same PR)
 
@@ -166,7 +166,7 @@ Binary search the entries, which are sorted by `tile_id`. Then:
 
 ## 8. Performance target
 
-Reference: Rust `pmtiles` crate, `get_tile` over 10,000 pseudo-random coordinates from an in-memory source (the crate has no memory backend, so the harness implements its one-method `AsyncBackend` over a `Bytes` buffer). Input: `bench/` (added before the first port's M3). Target: within 2× of the reference.
+Reference: Rust `pmtiles` crate, `get_tile` over 10,000 pseudo-random coordinates from an in-memory source (the crate has no memory backend, so the harness implements its one-method `AsyncBackend` over a `Bytes` buffer). Input: `bench/bench.pmtiles` and `bench/coords.txt`; method and checksum in `bench/README.md`. Target: within 2× of the reference.
 
 ## 9. Security notes
 
