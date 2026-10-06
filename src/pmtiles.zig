@@ -170,20 +170,44 @@ const Cursor = struct {
     /// Start of the varint read last, for diagnostics.
     start: usize = 0,
 
-    fn varint(c: *Cursor, diag: ?*Diagnostics) Error!u64 {
-        c.start = c.pos;
+    inline fn varint(c: *Cursor, diag: ?*Diagnostics) Error!u64 {
+        // Fast path: directory values almost always fit in one or two bytes.
+        c.start = c.pos; // error offsets point at the value's first byte
+        if (c.pos + 1 < c.bytes.len) {
+            const b0 = c.bytes[c.pos];
+            if (b0 < 0x80) {
+                c.pos += 1;
+                return b0;
+            }
+            const b1 = c.bytes[c.pos + 1];
+            if (b1 < 0x80) {
+                c.pos += 2;
+                return @as(u64, b0 & 0x7F) | @as(u64, b1) << 7;
+            }
+        }
+        const v = try varintSlow(c.bytes, c.pos, diag);
+        c.pos += v.len;
+        return v.value;
+    }
+
+    const Varint = struct { value: u64, len: usize };
+
+    /// Takes the bytes and position by value, so the cursor's address never
+    /// escapes the inlined fast path and its fields can stay in registers.
+    fn varintSlow(bytes: []const u8, start: usize, diag: ?*Diagnostics) Error!Varint {
+        var pos = start;
         var result: u64 = 0;
         var n: u6 = 0;
         while (n < 10) : (n += 1) {
-            if (c.pos >= c.bytes.len) return fail(diag, "truncated", c.start, error.InvalidInput);
-            const byte = c.bytes[c.pos];
-            c.pos += 1;
+            if (pos >= bytes.len) return fail(diag, "truncated", start, error.InvalidInput);
+            const byte = bytes[pos];
+            pos += 1;
             // The 10th byte may only carry bit 63.
-            if (n == 9 and byte > 1) return fail(diag, "varint_overflow", c.start, error.InvalidInput);
+            if (n == 9 and byte > 1) return fail(diag, "varint_overflow", start, error.InvalidInput);
             result |= @as(u64, byte & 0x7F) << (7 * n);
-            if (byte < 0x80) return result;
+            if (byte < 0x80) return .{ .value = result, .len = pos - start };
         }
-        return fail(diag, "varint_overflow", c.start, error.InvalidInput);
+        return fail(diag, "varint_overflow", start, error.InvalidInput);
     }
 };
 
@@ -191,7 +215,11 @@ const Cursor = struct {
 /// spec §3 in order. With `out` it also stores the entries; without it, it
 /// only finds the error (used when the input is too short to hold `n`
 /// entries, so nothing is allocated for it).
-fn walkDirectory(c: *Cursor, n: u64, out: ?[]Entry, diag: ?*Diagnostics) Error!void {
+fn walkDirectory(cursor: *Cursor, n: u64, out: ?[]Entry, diag: ?*Diagnostics) Error!void {
+    // Work on a local copy: stores into `out` could otherwise alias the
+    // cursor, forcing its position through memory on every varint.
+    var c = cursor.*;
+    defer cursor.* = c;
     const u32_max = std.math.maxInt(u32);
 
     var id: u64 = 0;
@@ -216,8 +244,8 @@ fn walkDirectory(c: *Cursor, n: u64, out: ?[]Entry, diag: ?*Diagnostics) Error!v
         if (len > u32_max) return fail(diag, "invalid_directory", c.start, error.InvalidInput);
         if (out) |e| e[@intCast(k)].length = @intCast(len);
     }
-    // A second cursor re-reads the (already validated) lengths, so the offsets
-    // can continue from the previous entry without storing anything.
+    // Offsets continue from the previous entry's length: stored ones when
+    // there is `out`, otherwise re-read (already validated) by a second cursor.
     var lengths: Cursor = .{ .bytes = c.bytes, .pos = lengths_start };
     var prev_offset: u64 = 0;
     var prev_length: u64 = 0;
@@ -232,7 +260,7 @@ fn walkDirectory(c: *Cursor, n: u64, out: ?[]Entry, diag: ?*Diagnostics) Error!v
         } else v - 1;
         if (out) |e| e[@intCast(k)].offset = offset;
         prev_offset = offset;
-        prev_length = lengths.varint(null) catch unreachable;
+        prev_length = if (out) |e| e[@intCast(k)].length else lengths.varint(null) catch unreachable;
     }
     // Bytes after the last offset are ignored (A2).
 }

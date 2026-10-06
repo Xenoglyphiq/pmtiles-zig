@@ -147,6 +147,46 @@ fn corrupt(what: Limited, diag: ?*Diagnostics) Error {
 /// Decompresses internal data (`none` or `gzip`). Takes ownership of `data`.
 /// Output above `limit` bytes is `directory_too_large` or
 /// `metadata_too_large`, per `what`.
+/// CRC-32 (IEEE), slicing-by-8: eight tables built at compile time, 8 bytes per step.
+/// std.hash.Crc32 is byte-at-a-time, and the gzip footer check was the hottest code in
+/// the benchmark.
+const crc_tables = blk: {
+    @setEvalBranchQuota(100_000);
+    var t: [8][256]u32 = undefined;
+    for (0..256) |n| {
+        var c: u32 = @intCast(n);
+        for (0..8) |_| c = if (c & 1 != 0) 0xEDB8_8320 ^ (c >> 1) else c >> 1;
+        t[0][n] = c;
+    }
+    for (1..8) |k| {
+        for (0..256) |n| t[k][n] = t[0][t[k - 1][n] & 0xFF] ^ (t[k - 1][n] >> 8);
+    }
+    break :blk t;
+};
+
+fn crc32(bytes: []const u8) u32 {
+    var c: u32 = 0xFFFF_FFFF;
+    var i: usize = 0;
+    while (i + 8 <= bytes.len) : (i += 8) {
+        const lo = c ^ std.mem.readInt(u32, bytes[i..][0..4], .little);
+        const hi = std.mem.readInt(u32, bytes[i + 4 ..][0..4], .little);
+        c = crc_tables[7][lo & 0xFF] ^ crc_tables[6][(lo >> 8) & 0xFF] ^
+            crc_tables[5][(lo >> 16) & 0xFF] ^ crc_tables[4][lo >> 24] ^
+            crc_tables[3][hi & 0xFF] ^ crc_tables[2][(hi >> 8) & 0xFF] ^
+            crc_tables[1][(hi >> 16) & 0xFF] ^ crc_tables[0][hi >> 24];
+    }
+    while (i < bytes.len) : (i += 1) c = crc_tables[0][(c ^ bytes[i]) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFF_FFFF;
+}
+
+test "crc32 matches std.hash.Crc32" {
+    var buf: [1037]u8 = undefined;
+    for (&buf, 0..) |*b, n| b.* = @truncate(n *% 2654435761);
+    for ([_]usize{ 0, 1, 7, 8, 9, 64, 1037 }) |len| {
+        try std.testing.expectEqual(std.hash.Crc32.hash(buf[0..len]), crc32(buf[0..len]));
+    }
+}
+
 fn decompress(gpa: Allocator, data: []u8, compression: Compression, limit: u64, what: Limited, diag: ?*Diagnostics) Error![]u8 {
     switch (compression) {
         .none => return data,
@@ -165,7 +205,7 @@ fn decompress(gpa: Allocator, data: []u8, compression: Compression, limit: u64, 
             // std.compress.flate reads the gzip footer but leaves checking it
             // to the caller.
             const footer = inflate.container_metadata.gzip;
-            if (footer.crc != std.hash.Crc32.hash(out) or footer.count != @as(u32, @truncate(out.len))) {
+            if (footer.crc != crc32(out) or footer.count != @as(u32, @truncate(out.len))) {
                 gpa.free(out);
                 return corrupt(what, diag);
             }
@@ -190,16 +230,57 @@ fn readDirectory(gpa: Allocator, src: Source, header: pmtiles.Header, offset: u6
 /// with the header's `tile_compression`, or null when the archive has no
 /// such tile. Follows leaf directories up to `opts.max_leaf_depth`. The
 /// caller owns the returned slice and frees it with `gpa`.
+///
+/// Stateless: reads the header and root directory on every call. For many
+/// lookups on one archive, use `Reader`, which keeps them.
 pub fn getTile(gpa: Allocator, src: Source, coord: TileCoord, opts: Options, diag: ?*Diagnostics) Error!?[]u8 {
     const header = try readHeader(gpa, src, diag);
     const tile_id = try pmtiles.zxyToTileId(coord, diag);
+    const root = try readDirectory(gpa, src, header, header.root_directory_offset, header.root_directory_length, opts, diag);
+    defer gpa.free(root);
+    return findTile(gpa, src, header, root, tile_id, opts, diag);
+}
 
-    var offset = header.root_directory_offset;
-    var len = header.root_directory_length;
+/// An open archive: the header and decoded root directory, read once by
+/// `init`, so each lookup reads only leaf directories and the tile itself.
+/// Returns the same results and errors as `getTile`, except that header and
+/// root directory errors come from `init`. Call `deinit` when done.
+pub const Reader = struct {
+    gpa: Allocator,
+    src: Source,
+    opts: Options,
+    header: pmtiles.Header,
+    root: []pmtiles.Entry,
+
+    /// Reads the header and root directory. `gpa` holds the root until
+    /// `deinit`; `src` must outlive the reader.
+    pub fn init(gpa: Allocator, src: Source, opts: Options, diag: ?*Diagnostics) Error!Reader {
+        const header = try readHeader(gpa, src, diag);
+        const root = try readDirectory(gpa, src, header, header.root_directory_offset, header.root_directory_length, opts, diag);
+        return .{ .gpa = gpa, .src = src, .opts = opts, .header = header, .root = root };
+    }
+
+    pub fn deinit(self: *Reader) void {
+        self.gpa.free(self.root);
+        self.* = undefined;
+    }
+
+    /// `get_tile` on the open archive. The caller owns the returned slice and
+    /// frees it with `gpa`, which may differ from the reader's.
+    pub fn getTile(self: *const Reader, gpa: Allocator, coord: TileCoord, diag: ?*Diagnostics) Error!?[]u8 {
+        const tile_id = try pmtiles.zxyToTileId(coord, diag);
+        return findTile(gpa, self.src, self.header, self.root, tile_id, self.opts, diag);
+    }
+};
+
+/// Finds `tile_id` starting from the decoded root directory, following leaf
+/// directories, and reads the tile.
+fn findTile(gpa: Allocator, src: Source, header: pmtiles.Header, root: []const pmtiles.Entry, tile_id: u64, opts: Options, diag: ?*Diagnostics) Error!?[]u8 {
+    var entries = root;
+    var leaf: ?[]pmtiles.Entry = null; // the current leaf directory, owned here
+    defer if (leaf) |l| gpa.free(l);
     var depth: u32 = 0; // the root is depth 0
     while (true) {
-        const entries = try readDirectory(gpa, src, header, offset, len, opts, diag);
-        defer gpa.free(entries);
         const entry = pmtiles.findEntry(entries, tile_id) orelse return null;
         if (entry.run_length > 0) {
             const start = std.math.add(u64, header.tile_data_offset, entry.offset) catch
@@ -208,9 +289,12 @@ pub fn getTile(gpa: Allocator, src: Source, coord: TileCoord, opts: Options, dia
         }
         if (depth == opts.max_leaf_depth) return fail(diag, "leaf_depth_exceeded", null, error.LimitExceeded);
         depth += 1;
-        offset = std.math.add(u64, header.leaf_directories_offset, entry.offset) catch
+        const offset = std.math.add(u64, header.leaf_directories_offset, entry.offset) catch
             return fail(diag, "invalid_directory", null, error.InvalidInput);
-        len = entry.length;
+        const next = try readDirectory(gpa, src, header, offset, entry.length, opts, diag);
+        if (leaf) |l| gpa.free(l);
+        leaf = next;
+        entries = next;
     }
 }
 
@@ -296,10 +380,16 @@ test "get_tile: follows a leaf directory; read_metadata returns the text as stor
         .{ .{ .z = 1, .x = 1, .y = 0 }, "ccc" }, // id 4, root
         .{ .{ .z = 2, .x = 0, .y = 0 }, null }, // id 5, past everything
     };
+    var reader: Reader = try .init(gpa, src, .{}, null);
+    defer reader.deinit();
     for (want) |w| {
         const got = try getTile(gpa, src, w[0], .{}, null);
         defer if (got) |g| gpa.free(g);
         if (w[1]) |bytes| try testing.expectEqualStrings(bytes, got.?) else try testing.expectEqual(@as(?[]u8, null), got);
+        // The caching reader returns the same bytes.
+        const cached = try reader.getTile(gpa, w[0], null);
+        defer if (cached) |g| gpa.free(g);
+        if (w[1]) |bytes| try testing.expectEqualStrings(bytes, cached.?) else try testing.expectEqual(@as(?[]u8, null), cached);
     }
     const meta = try readMetadata(gpa, src, .{}, null);
     defer gpa.free(meta);
@@ -433,7 +523,7 @@ test "FileSource reads the same bytes as MemorySource" {
     try testing.expectEqual(@as(usize, 3), tail.len);
 }
 
-test "fuzz: get_tile and read_metadata on mutated archives return only declared errors" {
+test "fuzz: get_tile, Reader and read_metadata on mutated archives return only declared errors" {
     try testing.fuzz({}, fuzzArchive, .{});
 }
 
@@ -462,9 +552,28 @@ fn fuzzArchive(context: void, smith: *testing.Smith) !void {
     const gpa = testing.allocator;
     var mem: MemorySource = .init(buf[0..len]);
     var diag: Diagnostics = .{};
-    if (getTile(gpa, mem.source(), coord, opts, &diag)) |tile| {
-        if (tile) |t| gpa.free(t);
-    } else |err| try expectCoded(err, diag);
+    const direct = getTile(gpa, mem.source(), coord, opts, &diag);
+    defer if (direct) |tile| if (tile) |t| gpa.free(t) else {} else |_| {};
+    if (direct) |_| {} else |err| try expectCoded(err, diag);
+
+    // The caching reader agrees with getTile: same bytes, or the same error.
+    diag = .{};
+    if (Reader.init(gpa, mem.source(), opts, &diag)) |r| {
+        var reader = r;
+        defer reader.deinit();
+        diag = .{};
+        if (reader.getTile(gpa, coord, &diag)) |tile| {
+            defer if (tile) |t| gpa.free(t);
+            const want = direct catch return error.TestUnexpectedResult;
+            if (want) |w| try testing.expectEqualSlices(u8, w, tile.?) else try testing.expectEqual(@as(?[]u8, null), tile);
+        } else |err| {
+            try expectCoded(err, diag);
+            try testing.expectError(err, direct);
+        }
+    } else |err| {
+        try expectCoded(err, diag);
+        try testing.expectError(err, direct);
+    }
     diag = .{};
     if (readMetadata(gpa, mem.source(), opts, &diag)) |meta| {
         gpa.free(meta);

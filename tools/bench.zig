@@ -3,6 +3,9 @@
 //! timed passes; reports median and min ms per pass, and the checksum (total
 //! bytes of all tiles returned), which every port must reproduce.
 //!
+//! Measures both the stateless `getTile` and `Reader`, which (like the Rust
+//! reference) keeps the header and root directory after opening.
+//!
 //! Usage: `zig build bench [-- <dir>]`, where `<dir>` holds both files
 //! (default `.spec/bench`). Always built ReleaseFast.
 
@@ -19,15 +22,37 @@ fn elapsedMs(io: Io, start: Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(ns)) / 1e6;
 }
 
+const expected_checksum = 998_434;
+
 /// One pass: every coordinate once. Returns the checksum.
-fn pass(gpa: std.mem.Allocator, src: pmtiles_io.Source, coords: []const pmtiles.TileCoord) !u64 {
+fn pass(gpa: std.mem.Allocator, src: pmtiles_io.Source, reader: ?*const pmtiles_io.Reader, coords: []const pmtiles.TileCoord) !u64 {
     var sum: u64 = 0;
     for (coords) |c| {
-        const tile = try pmtiles_io.getTile(gpa, src, c, .{}, null) orelse continue;
+        const found = if (reader) |r| try r.getTile(gpa, c, null) else try pmtiles_io.getTile(gpa, src, c, .{}, null);
+        const tile = found orelse continue;
         sum += tile.len;
         gpa.free(tile);
     }
     return sum;
+}
+
+fn measure(io: Io, gpa: std.mem.Allocator, name: []const u8, src: pmtiles_io.Source, reader: ?*const pmtiles_io.Reader, coords: []const pmtiles.TileCoord) !void {
+    var samples: [runs]f64 = undefined;
+    for (0..warmup + runs) |i| {
+        const start = Io.Timestamp.now(io, .awake);
+        const sum = try pass(gpa, src, reader, coords);
+        const ms = elapsedMs(io, start);
+        if (sum != expected_checksum) return error.WrongChecksum;
+        if (i >= warmup) samples[i - warmup] = ms;
+    }
+    std.mem.sort(f64, &samples, {}, std.sort.asc(f64));
+    std.debug.print("pmtiles zig ReleaseFast {s}: get_tile x {d} from memory: median {d:.3} ms (min {d:.3}) per pass, checksum {d} ok\n", .{
+        name,
+        coords.len,
+        samples[runs / 2],
+        samples[0],
+        @as(u64, expected_checksum),
+    });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -55,21 +80,8 @@ pub fn main(init: std.process.Init) !void {
     var mem: pmtiles_io.MemorySource = .init(archive);
     const src = mem.source();
 
-    var samples: [runs]f64 = undefined;
-    var checksum: ?u64 = null;
-    for (0..warmup + runs) |i| {
-        const start = Io.Timestamp.now(io, .awake);
-        const sum = try pass(gpa, src, coords.items);
-        const ms = elapsedMs(io, start);
-        if (checksum != null and checksum.? != sum) return error.ChecksumChanged;
-        checksum = sum;
-        if (i >= warmup) samples[i - warmup] = ms;
-    }
-    std.mem.sort(f64, &samples, {}, std.sort.asc(f64));
-    std.debug.print("pmtiles zig ReleaseFast: get_tile x {d} from memory: median {d:.3} ms (min {d:.3}) per pass, checksum {d}\n", .{
-        coords.items.len,
-        samples[runs / 2],
-        samples[0],
-        checksum.?,
-    });
+    try measure(io, gpa, "stateless getTile", src, null, coords.items);
+    var reader: pmtiles_io.Reader = try .init(gpa, src, .{}, null);
+    defer reader.deinit();
+    try measure(io, gpa, "Reader", src, &reader, coords.items);
 }

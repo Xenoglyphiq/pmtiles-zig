@@ -89,10 +89,11 @@ const metadata = try pmtiles_io.readMetadata(gpa, http.source(), .{}, &diag);
 | `findEntry(entries, tile_id) ?Entry` | `find_entry` | `pmtiles` |
 | `getTile(gpa, source, coord, opts, diag) Error!?[]u8` | `get_tile` | `pmtiles_io` |
 | `readMetadata(gpa, source, opts, diag) Error![]u8` (unparsed JSON) | `read_metadata` | `pmtiles_io` |
+| `Reader.init(gpa, source, opts, diag)`, then `reader.getTile(gpa, coord, diag)` | `get_tile` on an open archive | `pmtiles_io` |
 
 `Header` fields use the spec's snake_case names; `bounds` and `center` are `BBox` and `LonLat` in degrees. Header counts stored as 0 are `null`. `Compression` and `TileType` are open enums (`enum(u8) { …, _ }`): values outside the spec's table keep their raw byte, and `std.enums.tagName` returns `null` for them.
 
-`getTile` and `readMetadata` are stateless: each call reads the header and the root directory again.
+`getTile` and `readMetadata` are stateless: each call reads the header and the root directory again. For many lookups on one archive, open a `Reader`: it reads the header and root directory once, then each `getTile` reads only leaf directories and the tile. It returns the same tiles and errors, except that header and root errors come from `init`. Call `deinit` when done.
 
 ### Sources
 
@@ -142,10 +143,10 @@ Errors are the error set `pmtiles.Error`, whose names are the spec's kinds: `Inv
 | Command | What |
 |---|---|
 | `zig build test` | Unit tests |
-| `zig build test --fuzz=1M` | Fuzz `decodeHeader`, `decodeDirectory`, and `getTile` / `readMetadata` on mutated archives |
+| `zig build test --fuzz=1M` | Fuzz `decodeHeader`, `decodeDirectory`, and `getTile` / `Reader` / `readMetadata` on mutated archives |
 | `zig build conformance` | Every case in `.spec/conformance/manifest.json` (io cases through both `FileSource` and `MemorySource`) |
 | `zig build examples` | The three canonical examples |
-| `zig build bench [-- <dir>]` | `getTile` timings on `.spec/bench/` (always ReleaseFast) |
+| `zig build bench [-- <dir>]` | `getTile` and `Reader` timings on `.spec/bench/` (always ReleaseFast) |
 
 ## Performance
 
