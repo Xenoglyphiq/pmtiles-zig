@@ -37,7 +37,9 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     const args = try init.minimal.args.toSlice(arena);
-    const manifest_path = if (args.len > 1) args[1] else ".spec/conformance/manifest.json";
+    // The last argument wins, so `zig build conformance -- <manifest>` overrides
+    // the vendored manifest the build step passes first.
+    const manifest_path = if (args.len > 1) args[args.len - 1] else ".spec/conformance/manifest.json";
     const bytes = try Io.Dir.cwd().readFileAlloc(io, manifest_path, arena, .limited(64 * 1024 * 1024));
     const manifest = (try json.parseFromSliceLeaky(json.Value, arena, bytes, .{})).object;
     const spec_version = manifest.get("spec_version").?.string;
