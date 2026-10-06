@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xenoglyphiq-kit/capability.schema.json",
+  "title": "Capability manifest (spec/capability.yaml)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "summary", "spec_version", "implements", "types", "operations", "errors", "limits", "conformance", "ports"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$", "description": "kebab-case capability id, e.g. pmtiles" },
+    "name": { "type": "string", "description": "Display name, e.g. PMTiles" },
+    "summary": { "type": "string", "maxLength": 200 },
+    "spec_version": { "$ref": "#/$defs/semver" },
+    "implements": {
+      "type": "array",
+      "description": "External standards this capability implements",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "version", "url"],
+        "properties": {
+          "name": { "type": "string" },
+          "version": { "type": "string" },
+          "url": { "type": "string", "format": "uri" },
+          "scope": { "type": "string", "description": "What part is covered, e.g. 'read only'" }
+        }
+      }
+    },
+    "conventions_overrides": {
+      "type": "array",
+      "description": "Deviations from .kit/CONVENTIONS.md; each needs a DECISIONS entry",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["topic", "rule", "decision"],
+        "properties": { "topic": { "type": "string" }, "rule": { "type": "string" }, "decision": { "type": "string", "pattern": "^D-[0-9]{3}$" } }
+      }
+    },
+    "types": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false,
+            "required": ["name", "kind", "fields"],
+            "properties": {
+              "name": { "$ref": "#/$defs/typeName" },
+              "kind": { "const": "struct" },
+              "doc": { "type": "string" },
+              "fields": { "type": "array", "items": { "$ref": "#/$defs/field" }, "minItems": 1 }
+            }
+          },
+          {
+            "type": "object", "additionalProperties": false,
+            "required": ["name", "kind", "values"],
+            "properties": {
+              "name": { "$ref": "#/$defs/typeName" },
+              "kind": { "const": "enum" },
+              "doc": { "type": "string" },
+              "open": { "type": "boolean", "default": false, "description": "Preserve unknown raw values as unknown(raw)" },
+              "raw_type": { "enum": ["u8", "u32", "u64", "i32", "i64", "string"] },
+              "values": {
+                "type": "array", "minItems": 1,
+                "items": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["name"],
+                  "properties": { "name": { "$ref": "#/$defs/snake" }, "raw": { "type": ["integer", "string"] }, "doc": { "type": "string" } }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "operations": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "layer", "inputs", "output", "errors", "doc"],
+        "properties": {
+          "name": { "$ref": "#/$defs/snake" },
+          "layer": { "enum": ["core", "io", "integrations"] },
+          "doc": { "type": "string" },
+          "inputs": { "type": "array", "items": { "$ref": "#/$defs/field" } },
+          "options": { "type": "array", "items": { "$ref": "#/$defs/field" }, "description": "Tunables with defaults; become an options object" },
+          "output": { "$ref": "#/$defs/typeRef" },
+          "errors": { "type": "array", "items": { "type": "string" }, "description": "Error codes this operation may produce (from top-level errors)" },
+          "uses_limits": { "type": "array", "items": { "$ref": "#/$defs/snake" } },
+          "streaming": { "type": "boolean", "default": false, "description": "Exposed as an incremental decoder in core" },
+          "zero_copy": { "type": "boolean", "default": false },
+          "absence": { "enum": ["optional", "error"], "description": "When the item may not exist: return optional or raise not_found" }
+        }
+      }
+    },
+    "errors": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["code", "kind", "doc"],
+        "properties": {
+          "code": { "type": "string", "pattern": "^[a-z][a-z0-9-]*\\.[a-z][a-z0-9_]*$", "description": "<capability>.<snake_name>" },
+          "kind": { "enum": ["invalid_input", "unsupported", "limit_exceeded", "not_found", "io", "internal"] },
+          "doc": { "type": "string" }
+        }
+      }
+    },
+    "limits": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "type", "default", "reason"],
+        "properties": {
+          "name": { "$ref": "#/$defs/snake" },
+          "type": { "enum": ["u32", "u64"] },
+          "default": { "type": "integer", "minimum": 0 },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "examples": {
+      "type": "array", "maxItems": 3,
+      "description": "The three canonical examples every port implements",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "title", "steps"],
+        "properties": { "id": { "$ref": "#/$defs/snake" }, "title": { "type": "string" }, "steps": { "type": "array", "items": { "type": "string" } } }
+      }
+    },
+    "conformance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["oracle", "manifest", "levels"],
+      "properties": {
+        "oracle": {
+          "type": "object", "additionalProperties": false,
+          "required": ["language", "package", "version"],
+          "properties": { "language": { "$ref": "#/$defs/lang" }, "package": { "type": "string" }, "version": { "type": "string" } }
+        },
+        "manifest": { "type": "string", "description": "Path relative to the capability root" },
+        "levels": {
+          "type": "array", "minItems": 1,
+          "items": { "enum": ["core", "io", "full"] }
+        }
+      }
+    },
+    "performance": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "reference": { "type": "string", "description": "Implementation and input used as the yardstick" },
+        "target": { "type": "string", "description": "e.g. 'within 2x of reference'" }
+      }
+    },
+    "ports": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["language", "status"],
+        "properties": {
+          "language": { "$ref": "#/$defs/lang" },
+          "status": { "enum": ["planned", "m0", "m1", "m2", "m3", "released", "stopped"] },
+          "package": { "type": "string" },
+          "claims": { "type": "array", "items": { "enum": ["core", "io", "full"] } },
+          "implements_spec": { "type": "string", "description": "semver range, e.g. '>=1.0 <2'" },
+          "dependency_tier": { "enum": ["T0", "T1", "T2", "T3"] },
+          "toolchain": { "type": "string" },
+          "path": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "semver": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$" },
+    "snake": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "typeName": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
+    "lang": { "enum": ["python", "swift", "go", "kotlin", "rust", "nim", "zig", "julia"] },
+    "typeRef": {
+      "type": "string",
+      "description": "Canonical type (.kit/CONVENTIONS.md §5) or a defined type name",
+      "pattern": "^(bool|i32|i64|u8|u32|u64|f32|f64|string|bytes|bytes_view|timestamp|duration|lonlat|bbox|void|[A-Z][A-Za-z0-9]*|(list|optional)<.+>|(map|ordered_map)<string, ?.+>)$"
+    },
+    "field": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "type"],
+      "properties": {
+        "name": { "$ref": "#/$defs/snake" },
+        "type": { "$ref": "#/$defs/typeRef" },
+        "doc": { "type": "string" },
+        "default": {},
+        "unit": { "type": "string" }
+      }
+    }
+  }
+}

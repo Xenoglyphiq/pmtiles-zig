@@ -1,0 +1,176 @@
+# PMTiles v3 reader — capability manifest (validated by .kit/schemas/capability.schema.json).
+id: pmtiles
+name: PMTiles
+summary: "Read PMTiles v3 single-file tile archives: header, directories, tile lookup and tile bytes."
+spec_version: 0.1.0
+
+implements:
+  - name: PMTiles
+    version: "3"
+    url: https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md
+    scope: read only
+
+types:
+  - name: Header
+    kind: struct
+    doc: The fixed 127-byte archive header.
+    fields:
+      - { name: spec_version, type: u8 }
+      - { name: root_directory_offset, type: u64, unit: bytes }
+      - { name: root_directory_length, type: u64, unit: bytes }
+      - { name: metadata_offset, type: u64, unit: bytes }
+      - { name: metadata_length, type: u64, unit: bytes }
+      - { name: leaf_directories_offset, type: u64, unit: bytes }
+      - { name: leaf_directories_length, type: u64, unit: bytes }
+      - { name: tile_data_offset, type: u64, unit: bytes }
+      - { name: tile_data_length, type: u64, unit: bytes }
+      - { name: addressed_tiles_count, type: optional<u64>, doc: "Absent when the archive stores 0 (unknown)" }
+      - { name: tile_entries_count, type: optional<u64> }
+      - { name: tile_contents_count, type: optional<u64> }
+      - { name: clustered, type: bool }
+      - { name: internal_compression, type: Compression }
+      - { name: tile_compression, type: Compression }
+      - { name: tile_type, type: TileType }
+      - { name: min_zoom, type: u8 }
+      - { name: max_zoom, type: u8 }
+      - { name: bounds, type: bbox, doc: Decoded from E7 integers to degrees }
+      - { name: center_zoom, type: u8 }
+      - { name: center, type: lonlat }
+  - name: Entry
+    kind: struct
+    doc: One directory entry. run_length 0 means the entry points to a leaf directory.
+    fields:
+      - { name: tile_id, type: u64 }
+      - { name: offset, type: u64, unit: bytes }
+      - { name: length, type: u32, unit: bytes }
+      - { name: run_length, type: u32 }
+  - name: TileCoord
+    kind: struct
+    fields:
+      - { name: z, type: u8 }
+      - { name: x, type: u32 }
+      - { name: "y", type: u32 }
+  - name: Compression
+    kind: enum
+    open: true
+    raw_type: u8
+    values:
+      - { name: unknown, raw: 0 }
+      - { name: none, raw: 1 }
+      - { name: gzip, raw: 2 }
+      - { name: brotli, raw: 3 }
+      - { name: zstd, raw: 4 }
+  - name: TileType
+    kind: enum
+    open: true
+    raw_type: u8
+    values:
+      - { name: unknown, raw: 0 }
+      - { name: mvt, raw: 1 }
+      - { name: png, raw: 2 }
+      - { name: jpeg, raw: 3 }
+      - { name: webp, raw: 4 }
+      - { name: avif, raw: 5 }
+
+operations:
+  - name: decode_header
+    layer: core
+    doc: Decode the first 127 bytes of an archive.
+    inputs: [{ name: data, type: bytes_view }]
+    output: Header
+    errors: [pmtiles.truncated, pmtiles.bad_magic, pmtiles.unsupported_version]
+
+  - name: decode_directory
+    layer: core
+    doc: Decode an already-decompressed directory into entries. Decompression is the io layer's job (D-001).
+    inputs: [{ name: data, type: bytes_view }]
+    output: list<Entry>
+    errors: [pmtiles.truncated, pmtiles.varint_overflow, pmtiles.directory_too_large, pmtiles.invalid_directory]
+    uses_limits: [max_directory_entries]
+
+  - name: zxy_to_tile_id
+    layer: core
+    doc: Hilbert-curve tile id for a tile coordinate.
+    inputs: [{ name: coord, type: TileCoord }]
+    output: u64
+    errors: [pmtiles.invalid_zoom, pmtiles.tile_out_of_range]
+
+  - name: tile_id_to_zxy
+    layer: core
+    doc: Inverse of zxy_to_tile_id.
+    inputs: [{ name: tile_id, type: u64 }]
+    output: TileCoord
+    errors: [pmtiles.invalid_zoom]
+
+  - name: find_entry
+    layer: core
+    doc: Find the entry covering tile_id in one directory (binary search, honoring run_length).
+    inputs:
+      - { name: entries, type: list<Entry> }
+      - { name: tile_id, type: u64 }
+    output: optional<Entry>
+    errors: []
+    absence: optional
+
+  - name: get_tile
+    layer: io
+    doc: Fetch the (still compressed) bytes of tile z/x/y, following leaf directories.
+    inputs:
+      - { name: coord, type: TileCoord }
+    output: optional<bytes>
+    errors: [pmtiles.truncated, pmtiles.bad_magic, pmtiles.unsupported_version, pmtiles.varint_overflow, pmtiles.directory_too_large, pmtiles.invalid_directory, pmtiles.invalid_zoom, pmtiles.tile_out_of_range, pmtiles.unsupported_compression, pmtiles.leaf_depth_exceeded, pmtiles.source_failed]
+    uses_limits: [max_leaf_depth, max_directory_bytes, max_directory_entries]
+    absence: optional
+
+  - name: read_metadata
+    layer: io
+    doc: Fetch and decompress the JSON metadata block.
+    inputs: []
+    output: string
+    errors: [pmtiles.truncated, pmtiles.bad_magic, pmtiles.unsupported_version, pmtiles.unsupported_compression, pmtiles.metadata_too_large, pmtiles.source_failed]
+    uses_limits: [max_metadata_bytes]
+
+errors:
+  - { code: pmtiles.truncated, kind: invalid_input, doc: Input ended before the structure was complete }
+  - { code: pmtiles.bad_magic, kind: invalid_input, doc: First 7 bytes are not "PMTiles" }
+  - { code: pmtiles.unsupported_version, kind: unsupported, doc: Spec version byte is not 3 }
+  - { code: pmtiles.varint_overflow, kind: invalid_input, doc: A varint exceeds 64 bits }
+  - { code: pmtiles.directory_too_large, kind: limit_exceeded, doc: "Entry count exceeds max_directory_entries" }
+  - { code: pmtiles.invalid_directory, kind: invalid_input, doc: "Tile ids not strictly increasing, the first entry continues from nothing (stored offset 0), or a value overflows its type" }
+  - { code: pmtiles.invalid_zoom, kind: invalid_input, doc: Zoom above 31 or tile id beyond the zoom-31 range }
+  - { code: pmtiles.tile_out_of_range, kind: invalid_input, doc: x or y is not below 2^z }
+  - { code: pmtiles.unsupported_compression, kind: unsupported, doc: Compression this port can't decode }
+  - { code: pmtiles.leaf_depth_exceeded, kind: limit_exceeded, doc: "Leaf directories nested deeper than max_leaf_depth" }
+  - { code: pmtiles.metadata_too_large, kind: limit_exceeded, doc: "Metadata length exceeds max_metadata_bytes" }
+  - { code: pmtiles.source_failed, kind: io, doc: The byte source failed to return the requested range }
+
+limits:
+  - { name: max_directory_entries, type: u64, default: 1000000, reason: Bound memory when decoding untrusted directories }
+  - { name: max_directory_bytes, type: u64, default: 16777216, reason: Bound a single directory fetch (16 MiB) }
+  - { name: max_leaf_depth, type: u32, default: 4, reason: Prevent cycles and deep chains in malicious archives }
+  - { name: max_metadata_bytes, type: u64, default: 16777216, reason: Bound the metadata fetch (16 MiB) }
+
+examples:
+  - id: inspect_archive
+    title: Print an archive's header
+    steps: [Open a local file, decode_header on the first 127 bytes, Print zooms, bounds, tile type]
+  - id: fetch_one_tile
+    title: Fetch one tile by z/x/y
+    steps: [Open a local file as a source, get_tile for 14/4825/6156, Print the byte count or "not found"]
+  - id: remote_metadata
+    title: Read metadata over HTTP
+    steps: [Create an HTTP range source, read_metadata, Print the JSON]
+
+conformance:
+  oracle: { language: python, package: pmtiles, version: "3.8.1" }
+  manifest: conformance/manifest.json
+  levels: [core, io, full]
+
+performance:
+  reference: Rust pmtiles crate, get_tile over 10,000 random tiles in bench/nyc.pmtiles from a memory source
+  target: within 2x of reference
+
+ports:
+  - { language: nim, status: planned, package: pmtiles, dependency_tier: T0 }
+  - { language: swift, status: planned, package: PMTiles, dependency_tier: T0, toolchain: "Swift tools 6.0" }
+  - { language: zig, status: planned, package: pmtiles, dependency_tier: T0 }
