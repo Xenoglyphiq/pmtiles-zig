@@ -1,6 +1,6 @@
 # PMTiles for Zig
 
-Read [PMTiles v3](https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md) single-file tile archives: header, directories, tile lookup and tile bytes, from memory, a local file, or any byte source you plug in (such as HTTP range requests). Implements PMTiles v3 (read only) · Spec v0.1.1 · Conformance: **core ✓ io ✓ full ✓** (68/68)
+Read [PMTiles v3](https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md) single-file tile archives: header, directories, tile lookup and tile bytes, from memory, a local file, or any byte source you plug in (such as HTTP range requests). Implements PMTiles v3 (read only) · Spec v0.2.0 · Conformance: **core ✓ io ✓ full ✓** (81/81)
 
 > **Tile bytes are returned as stored.** `getTile` gives you the tile still compressed with `header.tile_compression` and doesn't parse it. Decoding MVT, PNG or other contents is up to you.
 
@@ -9,7 +9,7 @@ Requires Zig **0.17.0**. Standard library only: gzip is `std.compress.flate`.
 ## Install
 
 ```
-zig fetch --save git+https://github.com/Xenoglyphiq/pmtiles-zig#v0.1.0
+zig fetch --save git+https://github.com/Xenoglyphiq/pmtiles-zig#v0.2.0
 ```
 
 Then in `build.zig`:
@@ -109,7 +109,9 @@ A source returns up to `len` bytes, fewer only when it ends first. A short read 
 | `brotli`, `zstd` | no: `pmtiles.unsupported_compression` |
 | `unknown`, unknown raw values | no: `pmtiles.unsupported_compression` |
 
-A gzip stream that doesn't decompress is `pmtiles.invalid_directory` for a directory and `pmtiles.truncated` for the metadata.
+A compressed stream that doesn't decode (corrupt, cut short, or a gzip CRC-32 or length mismatch) is `pmtiles.decompression_failed`.
+
+**Metadata** must be well-formed UTF-8 (`std.unicode.utf8ValidateSlice`); anything else is `pmtiles.invalid_metadata`. The JSON itself isn't parsed.
 
 ## Limits and errors
 
@@ -139,7 +141,7 @@ Errors are the error set `pmtiles.Error`, whose names are the spec's kinds: `Inv
 |---|---|
 | `zig build test` | Unit tests |
 | `zig build test --fuzz=1M` | Fuzz `decodeHeader`, `decodeDirectory`, and `getTile` / `Reader` / `readMetadata` on mutated archives |
-| `zig build conformance` | Every case in `.spec/conformance/manifest.json` (io cases through both `FileSource` and `MemorySource`) |
+| `zig build conformance [-- <manifest.json>]` | Every case in `.spec/conformance/manifest.json`, or the manifest given (io cases through both `FileSource` and `MemorySource`) |
 | `zig build examples` | The three canonical examples |
 | `zig build bench [-- <dir>]` | `getTile` and `Reader` timings on `.spec/bench/` (always ReleaseFast) |
 

@@ -134,14 +134,11 @@ fn readHeader(gpa: Allocator, src: Source, diag: ?*Diagnostics) Error!pmtiles.He
 
 const Limited = enum { directory, metadata };
 
-/// A corrupt or cut-off gzip stream. The spec has no code for this yet; until
-/// it does, every port reports `invalid_directory` for a directory and
-/// `truncated` for the metadata.
-fn corrupt(what: Limited, diag: ?*Diagnostics) Error {
-    return switch (what) {
-        .directory => fail(diag, "invalid_directory", null, error.InvalidInput),
-        .metadata => fail(diag, "truncated", null, error.InvalidInput),
-    };
+/// A corrupt or cut-off gzip stream, or one whose CRC-32 or length doesn't
+/// match: `pmtiles.decompression_failed`, for directories and metadata alike
+/// (spec D-006).
+fn corrupt(diag: ?*Diagnostics) Error {
+    return fail(diag, "decompression_failed", null, error.InvalidInput);
 }
 
 /// Decompresses internal data (`none` or `gzip`). Takes ownership of `data`.
@@ -200,14 +197,14 @@ fn decompress(gpa: Allocator, data: []u8, compression: Compression, limit: u64, 
                     .directory => fail(diag, "directory_too_large", null, error.LimitExceeded),
                     .metadata => fail(diag, "metadata_too_large", null, error.LimitExceeded),
                 },
-                error.ReadFailed => return corrupt(what, diag),
+                error.ReadFailed => return corrupt(diag),
             };
             // std.compress.flate reads the gzip footer but leaves checking it
             // to the caller.
             const footer = inflate.container_metadata.gzip;
             if (footer.crc != crc32(out) or footer.count != @as(u32, @truncate(out.len))) {
                 gpa.free(out);
-                return corrupt(what, diag);
+                return corrupt(diag);
             }
             return out;
         },
@@ -299,14 +296,21 @@ fn findTile(gpa: Allocator, src: Source, header: pmtiles.Header, root: []const p
 }
 
 /// Spec operation `read_metadata`. Returns the archive's metadata JSON,
-/// decompressed but unparsed, exactly as stored. The caller owns the
+/// decompressed but unparsed, exactly as stored. Metadata that isn't
+/// well-formed UTF-8 is `pmtiles.invalid_metadata` (spec D-007). The caller owns the
 /// returned slice and frees it with `gpa`.
 pub fn readMetadata(gpa: Allocator, src: Source, opts: Options, diag: ?*Diagnostics) Error![]u8 {
     const header = try readHeader(gpa, src, diag);
     if (header.metadata_length > opts.max_metadata_bytes)
         return fail(diag, "metadata_too_large", null, error.LimitExceeded);
     const raw = try readExact(gpa, src, header.metadata_offset, header.metadata_length, diag);
-    return decompress(gpa, raw, header.internal_compression, opts.max_metadata_bytes, .metadata, diag);
+    const text = try decompress(gpa, raw, header.internal_compression, opts.max_metadata_bytes, .metadata, diag);
+    // Strict: rejects overlong forms and encoded surrogates.
+    if (!std.unicode.utf8ValidateSlice(text)) {
+        gpa.free(text);
+        return fail(diag, "invalid_metadata", null, error.InvalidInput);
+    }
+    return text;
 }
 
 // ---------------------------------------------------------------------------
@@ -488,13 +492,14 @@ test "get_tile: gzip directories; decompression limits and failures" {
     var diag: Diagnostics = .{};
     try testing.expectError(error.LimitExceeded, decompress(gpa, try gpa.dupe(u8, zeros), .gzip, 999, .metadata, &diag));
     try testing.expectEqualStrings("pmtiles.metadata_too_large", diag.code);
-    // A corrupt stream (bad CRC, or cut off) is invalid input.
+    // A corrupt stream (bad CRC, or cut off) is decompression_failed, for
+    // directories and metadata alike (spec D-006).
     var bad = zeros.*;
     bad[bad.len - 6] ^= 1;
     try testing.expectError(error.InvalidInput, decompress(gpa, try gpa.dupe(u8, &bad), .gzip, 1000, .directory, &diag));
-    try testing.expectEqualStrings("pmtiles.invalid_directory", diag.code);
+    try testing.expectEqualStrings("pmtiles.decompression_failed", diag.code);
     try testing.expectError(error.InvalidInput, decompress(gpa, try gpa.dupe(u8, zeros[0..20]), .gzip, 1000, .metadata, &diag));
-    try testing.expectEqualStrings("pmtiles.truncated", diag.code);
+    try testing.expectEqualStrings("pmtiles.decompression_failed", diag.code);
     try testing.expectError(error.Unsupported, decompress(gpa, try gpa.dupe(u8, zeros), .brotli, 1000, .directory, &diag));
     try testing.expectEqualStrings("pmtiles.unsupported_compression", diag.code);
 }

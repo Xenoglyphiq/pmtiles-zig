@@ -1,6 +1,6 @@
 {
   "capability": "pmtiles",
-  "spec_version": "0.1.1",
+  "spec_version": "0.2.0",
   "oracle": {
     "language": "python",
     "package": "pmtiles",
@@ -29292,6 +29292,299 @@
       },
       "expect": {
         "value": "{\"name\": \"small\", \"description\": \"z0-z3 test archive\"}"
+      },
+      "compare": "exact",
+      "source": "spec"
+    },
+    {
+      "id": "get_tile.error.decompression_failed",
+      "op": "get_tile",
+      "level": "io",
+      "group": "get_tile.v0_2",
+      "description": "Root directory's gzip CRC-32 doesn't match: decompression_failed, not invalid_directory (D-006)",
+      "input": {
+        "file": "archives/bad-root-crc.pmtiles",
+        "args": {
+          "coord": {
+            "z": 2,
+            "x": 1,
+            "y": 3
+          }
+        }
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_input",
+          "code": "pmtiles.decompression_failed"
+        }
+      },
+      "compare": "exact",
+      "source": "spec"
+    },
+    {
+      "id": "metadata.error.decompression_failed",
+      "op": "read_metadata",
+      "level": "io",
+      "group": "metadata.v0_2",
+      "description": "Metadata gzip stream cut short: decompression_failed, not truncated (D-006)",
+      "input": {
+        "file": "archives/cut-metadata-gzip.pmtiles"
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_input",
+          "code": "pmtiles.decompression_failed"
+        }
+      },
+      "compare": "exact",
+      "source": "spec"
+    },
+    {
+      "id": "get_tile.error.directory_inflates_too_large",
+      "op": "get_tile",
+      "level": "io",
+      "group": "get_tile.v0_2",
+      "description": "Root is under max_directory_bytes compressed but over it decompressed",
+      "input": {
+        "file": "archives/inflating-root.pmtiles",
+        "args": {
+          "coord": {
+            "z": 0,
+            "x": 0,
+            "y": 0
+          }
+        }
+      },
+      "options": {
+        "max_directory_bytes": 1024
+      },
+      "expect": {
+        "error": {
+          "kind": "limit_exceeded",
+          "code": "pmtiles.directory_too_large"
+        }
+      },
+      "compare": "exact",
+      "source": "spec"
+    },
+    {
+      "id": "get_tile.directory_under_limit",
+      "op": "get_tile",
+      "level": "io",
+      "group": "get_tile.v0_2",
+      "description": "Control: the same limit with a small directory succeeds",
+      "input": {
+        "file": "archives/flat-root.pmtiles",
+        "args": {
+          "coord": {
+            "z": 0,
+            "x": 0,
+            "y": 0
+          }
+        }
+      },
+      "options": {
+        "max_directory_bytes": 1024
+      },
+      "expect": {
+        "base64": "AA=="
+      },
+      "compare": "bytes",
+      "source": "spec"
+    },
+    {
+      "id": "metadata.error.inflates_too_large",
+      "op": "read_metadata",
+      "level": "io",
+      "group": "metadata.v0_2",
+      "description": "Metadata is under max_metadata_bytes compressed but over it decompressed",
+      "input": {
+        "file": "archives/inflating-metadata.pmtiles"
+      },
+      "options": {
+        "max_metadata_bytes": 1024
+      },
+      "expect": {
+        "error": {
+          "kind": "limit_exceeded",
+          "code": "pmtiles.metadata_too_large"
+        }
+      },
+      "compare": "exact",
+      "source": "spec"
+    },
+    {
+      "id": "get_tile.error.tile_past_end",
+      "op": "get_tile",
+      "level": "io",
+      "group": "get_tile.v0_2",
+      "description": "A tile entry ends past the end of the archive: truncated",
+      "input": {
+        "file": "archives/tile-past-end.pmtiles",
+        "args": {
+          "coord": {
+            "z": 0,
+            "x": 0,
+            "y": 0
+          }
+        }
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_input",
+          "code": "pmtiles.truncated"
+        }
+      },
+      "compare": "exact",
+      "source": "spec"
+    },
+    {
+      "id": "get_tile.error.leaf_too_large",
+      "op": "get_tile",
+      "level": "io",
+      "group": "get_tile.v0_2",
+      "description": "max_directory_bytes applies to leaf directories, not just the root",
+      "input": {
+        "file": "archives/big-leaf.pmtiles",
+        "args": {
+          "coord": {
+            "z": 0,
+            "x": 0,
+            "y": 0
+          }
+        }
+      },
+      "options": {
+        "max_directory_bytes": 100
+      },
+      "expect": {
+        "error": {
+          "kind": "limit_exceeded",
+          "code": "pmtiles.directory_too_large"
+        }
+      },
+      "compare": "exact",
+      "source": "spec"
+    },
+    {
+      "id": "get_tile.error.offset_overflow",
+      "op": "get_tile",
+      "level": "io",
+      "group": "get_tile.v0_2",
+      "description": "tile_data_offset + entry offset overflows u64: invalid_directory",
+      "input": {
+        "file": "archives/offset-overflow.pmtiles",
+        "args": {
+          "coord": {
+            "z": 0,
+            "x": 0,
+            "y": 0
+          }
+        }
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_input",
+          "code": "pmtiles.invalid_directory"
+        }
+      },
+      "compare": "exact",
+      "source": "spec"
+    },
+    {
+      "id": "get_tile.leaf_depth.at_limit",
+      "op": "get_tile",
+      "level": "io",
+      "group": "get_tile.v0_2",
+      "description": "Four nested leaf pointers: allowed at the default max_leaf_depth of 4",
+      "input": {
+        "file": "archives/leaf-chain-4.pmtiles",
+        "args": {
+          "coord": {
+            "z": 0,
+            "x": 0,
+            "y": 0
+          }
+        }
+      },
+      "expect": {
+        "base64": "dGlsZQ=="
+      },
+      "compare": "bytes",
+      "source": "spec"
+    },
+    {
+      "id": "get_tile.error.leaf_depth_exceeded",
+      "op": "get_tile",
+      "level": "io",
+      "group": "get_tile.v0_2",
+      "description": "Five nested leaf pointers: one more than the default limit",
+      "input": {
+        "file": "archives/leaf-chain-5.pmtiles",
+        "args": {
+          "coord": {
+            "z": 0,
+            "x": 0,
+            "y": 0
+          }
+        }
+      },
+      "expect": {
+        "error": {
+          "kind": "limit_exceeded",
+          "code": "pmtiles.leaf_depth_exceeded"
+        }
+      },
+      "compare": "exact",
+      "source": "spec"
+    },
+    {
+      "id": "metadata.error.invalid_utf8",
+      "op": "read_metadata",
+      "level": "io",
+      "group": "metadata.v0_2",
+      "description": "A Latin-1 byte (0xE9) isn't UTF-8",
+      "input": {
+        "file": "archives/metadata-latin1.pmtiles"
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_input",
+          "code": "pmtiles.invalid_metadata"
+        }
+      },
+      "compare": "exact",
+      "source": "spec"
+    },
+    {
+      "id": "metadata.error.utf8_surrogate",
+      "op": "read_metadata",
+      "level": "io",
+      "group": "metadata.v0_2",
+      "description": "An encoded UTF-16 surrogate (U+D800) isn't well-formed UTF-8",
+      "input": {
+        "file": "archives/metadata-surrogate.pmtiles"
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_input",
+          "code": "pmtiles.invalid_metadata"
+        }
+      },
+      "compare": "exact",
+      "source": "spec"
+    },
+    {
+      "id": "metadata.utf8_multibyte",
+      "op": "read_metadata",
+      "level": "io",
+      "group": "metadata.v0_2",
+      "description": "Valid multi-byte UTF-8 is returned as is",
+      "input": {
+        "file": "archives/metadata-utf8.pmtiles"
+      },
+      "expect": {
+        "value": "{\"name\":\"Firenze \u2713 \ud83d\uddfa\"}"
       },
       "compare": "exact",
       "source": "spec"

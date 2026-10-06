@@ -50,6 +50,9 @@ pub fn build(b: *std.Build) void {
     });
     const run_conformance = b.addRunArtifact(runner);
     run_conformance.addFileArg(b.path(".spec/conformance/manifest.json"));
+    // `zig build conformance -- <manifest.json>` runs another manifest instead
+    // (a spec release candidate, say): the runner uses its last argument.
+    run_conformance.addPassthruArgs();
     const conformance_step = b.step("conformance", "Run the spec's conformance cases");
     conformance_step.dependOn(&run_conformance.step);
 
