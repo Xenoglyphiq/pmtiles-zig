@@ -8,11 +8,6 @@ Requires Zig **0.17.0**. Standard library only: gzip is `std.compress.flate`.
 
 ## Install
 
-> **Not released yet.** Until the first release, fetch the default branch:
-> `zig fetch --save git+https://github.com/Xenoglyphiq/pmtiles-zig`
-
-Once `v0.1.0` is tagged:
-
 ```
 zig fetch --save git+https://github.com/Xenoglyphiq/pmtiles-zig#v0.1.0
 ```
