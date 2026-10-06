@@ -2,7 +2,7 @@
 id: pmtiles
 name: PMTiles
 summary: "Read PMTiles v3 single-file tile archives: header, directories, tile lookup and tile bytes."
-spec_version: 0.1.0
+spec_version: 0.1.1
 
 implements:
   - name: PMTiles
@@ -171,6 +171,6 @@ performance:
   target: within 2x of reference
 
 ports:
-  - { language: nim, status: planned, package: pmtiles, dependency_tier: T0 }
-  - { language: swift, status: planned, package: PMTiles, dependency_tier: T0, toolchain: "Swift tools 6.0" }
-  - { language: zig, status: planned, package: pmtiles, dependency_tier: T0 }
+  - { language: nim, status: m3, package: pmtiles, claims: [core, io, full], implements_spec: "0.1.1", dependency_tier: T1 }
+  - { language: swift, status: m3, package: PMTiles, claims: [core, io, full], implements_spec: "0.1.1", dependency_tier: T0, toolchain: "Swift tools 6.0" }
+  - { language: zig, status: m3, package: pmtiles, claims: [core, io, full], implements_spec: "0.1.1", dependency_tier: T0 }

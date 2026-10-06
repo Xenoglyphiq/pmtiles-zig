@@ -51,7 +51,7 @@ from pmtiles.reader import MemorySource, Reader
 from pmtiles.writer import Writer
 
 ORACLE = {"language": "python", "package": "pmtiles", "version": "3.8.1", "script": "generate/generate.py"}
-SPEC_VERSION = "0.1.0"
+SPEC_VERSION = "0.1.1"
 GENERATED_AT = "2026-10-06T00:00:00Z"  # bump by hand when cases change
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ROOT / "cases"
