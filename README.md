@@ -152,9 +152,10 @@ Errors are the error set `pmtiles.Error`, whose names are the spec's kinds: `Inv
 
 | Benchmark | Reference | This port | Ratio |
 |---|---|---|---|
-| get_tile, 10,000 lookups | Rust `pmtiles` | — | — |
+| `get_tile`, `Reader` | Rust `pmtiles` 0.24.1: 165.1 ms | 272.7 ms | 1.65× |
+| `get_tile`, stateless | Rust `pmtiles` 0.24.1: 165.1 ms | 280.4 ms | 1.70× |
 
-Recorded before v0.1.0.
+Median per pass of 10,000 lookups from memory, method in `.spec/bench/README.md`. Recorded 2026-10-06 on an Apple M5 Pro, interleaved with the reference in one session (median of three rounds). Zig 0.17.0, ReleaseFast.
 
 ## License
 
