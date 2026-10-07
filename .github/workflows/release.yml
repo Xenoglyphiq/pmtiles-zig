@@ -1,0 +1,41 @@
+name: release
+
+# Creates the GitHub release for a version tag, so a tag pushed from anywhere gets one.
+# Notes come from CHANGELOG.md's section for the version when there is one, otherwise
+# from the merged pull requests since the previous tag. An existing release is left
+# alone, so notes written by hand (`gh release edit`) are never overwritten.
+on:
+  push:
+    tags: ['v[0-9]*', '[0-9]*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          TITLE: "${{ github.ref_name }}"
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; leaving it as is."
+            exit 0
+          fi
+          version="${TAG#v}"
+          notes=""
+          if [ -f CHANGELOG.md ]; then
+            # The "## <version> ..." section, up to the next "## " heading.
+            notes=$(awk -v v="$version" '/^## /{f = ($2 == v); next} f' CHANGELOG.md)
+          fi
+          if [ -n "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+            printf '%s\n' "$notes" > "$RUNNER_TEMP/notes.md"
+            gh release create "$TAG" --verify-tag --title "$TITLE" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "$TAG" --verify-tag --title "$TITLE" --generate-notes
+          fi

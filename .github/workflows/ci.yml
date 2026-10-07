@@ -3,7 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'LICENSE-*']  # docs-only changes don't need CI
   pull_request:
+    paths-ignore: ['**.md', 'LICENSE-*']  # docs-only changes don't need CI
 
 permissions:
   contents: read
